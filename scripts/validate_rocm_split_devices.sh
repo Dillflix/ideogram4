@@ -284,14 +284,27 @@ if diffusion == text:
 
 diffusion_name = torch.cuda.get_device_name(diffusion.index)
 text_name = torch.cuda.get_device_name(text.index)
+diffusion_vram_gib = torch.cuda.get_device_properties(diffusion.index).total_memory / 1024**3
+text_vram_gib = torch.cuda.get_device_properties(text.index).total_memory / 1024**3
 mismatches = []
 if expected_diffusion and expected_diffusion not in diffusion_name.casefold():
-  mismatches.append(
-    f"diffusion device {diffusion} is {diffusion_name!r}, expected substring {sys.argv[3]!r}"
-  )
+  generic_amd_name = diffusion_name.casefold() == "amd radeon graphics"
+  expected_7900_memory = 18.0 <= diffusion_vram_gib <= 24.0
+  if expected_diffusion == "7900 xt" and generic_amd_name and expected_7900_memory:
+    print(
+      "WARNING: ROCm reported the diffusion GPU with the generic name "
+      f"{diffusion_name!r}; accepting it as the expected 7900 XT based on "
+      f"its {diffusion_vram_gib:.2f} GiB VRAM."
+    )
+  else:
+    mismatches.append(
+      f"diffusion device {diffusion} is {diffusion_name!r} "
+      f"with {diffusion_vram_gib:.2f} GiB VRAM, expected substring {sys.argv[3]!r}"
+    )
 if expected_text and expected_text not in text_name.casefold():
   mismatches.append(
-    f"text device {text} is {text_name!r}, expected substring {sys.argv[4]!r}"
+    f"text device {text} is {text_name!r} with {text_vram_gib:.2f} GiB VRAM, "
+    f"expected substring {sys.argv[4]!r}"
   )
 if mismatches:
   message = "\n".join(mismatches)

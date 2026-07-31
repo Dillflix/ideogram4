@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from ideogram4 import Ideogram4Pipeline, Ideogram4PipelineConfig
+from ideogram4 import PRESETS, Ideogram4Pipeline, Ideogram4PipelineConfig
 
 
 def _parse_args() -> argparse.Namespace:
@@ -24,6 +24,12 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument("--text-device", default="cuda:1")
   parser.add_argument("--height", type=int, default=256)
   parser.add_argument("--width", type=int, default=256)
+  parser.add_argument(
+    "--sampler-preset",
+    choices=["custom", *sorted(PRESETS)],
+    default="custom",
+    help="Use an official preset, or custom for --num-steps/--guidance-scale.",
+  )
   parser.add_argument("--num-steps", type=int, default=2)
   parser.add_argument("--guidance-scale", type=float, default=7.0)
   parser.add_argument("--seed", type=int, default=0)
@@ -81,13 +87,25 @@ def main() -> None:
   for device in tracked_devices:
     torch.cuda.reset_peak_memory_stats(device)
 
+  generation_kwargs = {
+    "num_steps": args.num_steps,
+    "guidance_scale": args.guidance_scale,
+  }
+  if args.sampler_preset != "custom":
+    preset = PRESETS[args.sampler_preset]
+    generation_kwargs = {
+      "num_steps": preset.num_steps,
+      "guidance_schedule": preset.guidance_schedule,
+      "mu": preset.mu,
+      "std": preset.std,
+    }
+  print(f"generation={args.width}x{args.height}, sampler={args.sampler_preset}")
   images = pipeline(
     caption,
     height=args.height,
     width=args.width,
-    num_steps=args.num_steps,
-    guidance_scale=args.guidance_scale,
     seed=args.seed,
+    **generation_kwargs,
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   images[0].save(args.output)

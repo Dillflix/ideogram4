@@ -194,6 +194,19 @@ python scripts/smoke_split_devices.py \
 The smoke script prints visible devices, peer-access status, and peak allocated
 and reserved memory. It does not call a hosted Magic Prompt API.
 
+After the small smoke passes, run the acceptance configuration with the
+official 20-step sampler schedule:
+
+```bash
+python scripts/smoke_split_devices.py \
+  --caption-file /path/to/structured-caption.json \
+  --output /tmp/ideogram4-1024.png \
+  --diffusion-device cuda:0 \
+  --text-device cuda:1 \
+  --height 1024 --width 1024 \
+  --sampler-preset V4_DEFAULT_20
+```
+
 ### Model access
 
 The model weights are **gated** on Hugging Face, so you must accept the gate and

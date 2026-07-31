@@ -154,6 +154,46 @@ under `src/ideogram4/` take effect without reinstalling:
 pip install -e .
 ```
 
+### Experimental split-device inference
+
+`Ideogram4Pipeline.from_pretrained` accepts an optional `text_device`. This
+keeps Qwen3-VL on that device while the conditional and unconditional diffusion
+transformers, VAE, sampling state, and decode state remain on `device`. If
+`text_device` is omitted, all components use `device` exactly as before.
+
+```python
+import torch
+
+pipeline = Ideogram4Pipeline.from_pretrained(
+  device="cuda:0",
+  text_device="cuda:1",
+  dtype=torch.bfloat16,
+)
+```
+
+On split devices, Qwen runs once over the left-padded text block only. The
+resulting float32 text features are copied once to the diffusion device before
+sampling, and image-position zeros are allocated there. There are no planned
+cross-device transfers in the denoising loop. A direct GPU transfer is tried
+first; runtimes without peer transfer support fall back to CPU staging with a
+warning.
+
+AMD ROCm multi-GPU support is experimental. PyTorch ROCm still uses the
+`cuda:N` device spelling. Use explicit indexes for split placement and verify
+the runtime mapping rather than assuming device order:
+
+```bash
+python scripts/smoke_split_devices.py \
+  --caption-file /path/to/structured-caption.json \
+  --output /tmp/ideogram4-smoke.png \
+  --diffusion-device cuda:0 \
+  --text-device cuda:1 \
+  --height 256 --width 256 --num-steps 2
+```
+
+The smoke script prints visible devices, peer-access status, and peak allocated
+and reserved memory. It does not call a hosted Magic Prompt API.
+
 ### Model access
 
 The model weights are **gated** on Hugging Face, so you must accept the gate and

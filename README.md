@@ -212,6 +212,23 @@ preflight, installs this checkout editable without replacing the existing ROCm
 PyTorch build, records `rocm-smi` telemetry, runs both core tests above, and can
 then launch ComfyUI:
 
+From the ComfyUI directory, this one command safely clones or updates both
+feature branches, creates a local structured test caption, runs the complete
+validator, and launches ComfyUI:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Dillflix/ideogram4/feature/split-text-diffusion-devices/scripts/fedora_one_step.sh)
+```
+
+If ComfyUI is elsewhere, identify it on the same command:
+
+```bash
+COMFYUI_DIR=/absolute/path/to/ComfyUI bash <(curl -fsSL https://raw.githubusercontent.com/Dillflix/ideogram4/feature/split-text-diffusion-devices/scripts/fedora_one_step.sh)
+```
+
+The lower-level equivalent, useful when the repositories are already prepared,
+is:
+
 ```bash
 chmod +x scripts/validate_rocm_split_devices.sh
 scripts/validate_rocm_split_devices.sh \

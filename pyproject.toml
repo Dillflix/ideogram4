@@ -56,6 +56,7 @@ packages = ["src/ideogram4"]
 include = [
   "src/ideogram4",
   "src/ideogram4/magic_prompt_system_prompts/*.txt",
+  "scripts/fedora_one_step.sh",
   "scripts/smoke_split_devices.py",
   "scripts/validate_rocm_split_devices.sh",
   "tests",

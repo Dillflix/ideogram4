@@ -57,6 +57,7 @@ include = [
   "src/ideogram4",
   "src/ideogram4/magic_prompt_system_prompts/*.txt",
   "scripts/smoke_split_devices.py",
+  "scripts/validate_rocm_split_devices.sh",
   "tests",
   "run_inference.py",
   "README.md",

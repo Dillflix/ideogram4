@@ -207,6 +207,25 @@ python scripts/smoke_split_devices.py \
   --sampler-preset V4_DEFAULT_20
 ```
 
+For the target Fedora/ROCm machine, the validation wrapper performs the full
+preflight, installs this checkout editable without replacing the existing ROCm
+PyTorch build, records `rocm-smi` telemetry, runs both core tests above, and can
+then launch ComfyUI:
+
+```bash
+chmod +x scripts/validate_rocm_split_devices.sh
+scripts/validate_rocm_split_devices.sh \
+  --caption /path/to/structured-caption.json \
+  --comfyui-dir /absolute/path/to/ComfyUI \
+  --launch-comfyui
+```
+
+The script fails before loading weights if the resolved device names do not
+contain `7900 XT` for the diffusion role and `8060S` for the text role. Use its
+explicit device/name options if the runtime mapping differs. Logs, peak-memory
+reports, generated images, and GPU telemetry are written to a timestamped
+validation directory.
+
 ### Model access
 
 The model weights are **gated** on Hugging Face, so you must accept the gate and

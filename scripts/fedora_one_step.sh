@@ -6,6 +6,7 @@ CORE_REPO="https://github.com/Dillflix/ideogram4.git"
 CORE_BRANCH="feature/split-text-diffusion-devices"
 WRAPPER_REPO="https://github.com/Dillflix/ComfyUI-Ideogram4.git"
 WRAPPER_BRANCH="feature/multigpu-device-routing"
+COMFYUI_REPO="https://github.com/comfyanonymous/ComfyUI.git"
 REMOTE_NAME="dillflix-validation"
 STATE_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/ideogram4-split-validation"
 CORE_DIR="$STATE_ROOT/ideogram4"
@@ -15,22 +16,51 @@ fail() {
   exit 1
 }
 
+is_comfyui_root() {
+  [[ -f "$1/main.py" && -f "$1/nodes.py" && -d "$1/comfy" ]]
+}
+
 find_comfyui() {
-  local candidate
+  local candidate venv_parent
+  local -a candidates=()
   if [[ -n "${COMFYUI_DIR:-}" ]]; then
     candidate="$COMFYUI_DIR"
-    [[ -f "$candidate/main.py" ]] || fail "COMFYUI_DIR does not contain main.py: $candidate"
+    is_comfyui_root "$candidate" || fail "COMFYUI_DIR is not a ComfyUI checkout: $candidate"
     readlink -f -- "$candidate"
     return
   fi
 
-  for candidate in "$PWD" "$HOME/ComfyUI" "$HOME/comfyui"; do
-    if [[ -f "$candidate/main.py" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    venv_parent="$(dirname -- "$VIRTUAL_ENV")"
+    candidates+=("$venv_parent" "$(dirname -- "$venv_parent")")
+  fi
+  candidates+=("$PWD" "$HOME/ComfyUI" "$HOME/comfyui")
+
+  for candidate in "${candidates[@]}"; do
+    if is_comfyui_root "$candidate"; then
       readlink -f -- "$candidate"
       return
     fi
   done
-  fail "ComfyUI was not found. Run from its directory or prefix the command with COMFYUI_DIR=/path/to/ComfyUI"
+
+  while IFS= read -r candidate; do
+    candidate="$(dirname -- "$candidate")"
+    if is_comfyui_root "$candidate"; then
+      echo "$candidate"
+      return
+    fi
+  done < <(
+    find "$HOME" -maxdepth 8 -type f -name main.py -ipath '*comfyui*' \
+      -print 2>/dev/null | sort
+  )
+
+  candidate="$STATE_ROOT/ComfyUI"
+  echo "Existing ComfyUI checkout not found; cloning it into $candidate" >&2
+  if [[ ! -d "$candidate/.git" ]]; then
+    mkdir -p -- "$(dirname -- "$candidate")"
+    git clone "$COMFYUI_REPO" "$candidate" >&2
+  fi
+  readlink -f -- "$candidate"
 }
 
 checkout_branch() {
@@ -119,6 +149,10 @@ VALIDATOR_ARGS=(
   --comfyui-dir "$COMFYUI_DIR"
   --launch-comfyui
 )
+
+if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+  VALIDATOR_ARGS+=(--python "$VIRTUAL_ENV/bin/python")
+fi
 
 if [[ -n "${IDEOGRAM4_VALIDATION_OUTPUT:-}" ]]; then
   VALIDATOR_ARGS+=(--output-dir "$IDEOGRAM4_VALIDATION_OUTPUT")

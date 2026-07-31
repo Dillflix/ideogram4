@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
-from posixpath import dirname as _posix_dirname, join as _posix_join
-from typing import Optional, Sequence
+from posixpath import dirname as _posix_dirname
+from posixpath import join as _posix_join
+from typing import Optional
 
 import torch
 from huggingface_hub import hf_hub_download
@@ -24,8 +27,8 @@ from ideogram4.constants import (
   IMAGE_POSITION_OFFSET,
   LLM_TOKEN_INDICATOR,
   OUTPUT_IMAGE_INDICATOR,
-  SEQUENCE_PADDING_INDICATOR,
   QWEN3_VL_ACTIVATION_LAYERS,
+  SEQUENCE_PADDING_INDICATOR,
 )
 from ideogram4.latent_norm import get_latent_norm
 from ideogram4.modeling_ideogram4 import Ideogram4Config, Ideogram4Transformer
@@ -43,6 +46,113 @@ from ideogram4.scheduler import (
   get_schedule_for_resolution,
   make_step_intervals,
 )
+
+
+def _device_name(device: torch.device) -> str:
+  """Return a useful device name without allowing diagnostics to fail."""
+  try:
+    if device.type == "cuda" and device.index is not None:
+      return torch.cuda.get_device_name(device.index)
+  except Exception:  # noqa: BLE001, S110 - diagnostics must never fail inference
+    pass
+  return str(device)
+
+
+def _device_description(device: torch.device) -> str:
+  return f"{device} ({_device_name(device)})"
+
+
+def _synchronize_device(device: torch.device) -> None:
+  try:
+    if device.type == "cuda":
+      torch.cuda.synchronize(device)
+  except Exception:  # noqa: BLE001, S110 - timing must never fail inference
+    pass
+
+
+def _log_device_memory(devices: Sequence[torch.device]) -> None:
+  seen: set[str] = set()
+  for device in devices:
+    key = str(device)
+    if key in seen:
+      continue
+    seen.add(key)
+    try:
+      if device.type != "cuda":
+        continue
+      allocated = torch.cuda.memory_allocated(device) / 1024**2
+      reserved = torch.cuda.memory_reserved(device) / 1024**2
+      print(
+        f"Ideogram4 memory: device={_device_description(device)}, "
+        f"allocated={allocated:.1f} MiB, reserved={reserved:.1f} MiB",
+        flush=True,
+      )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never fail inference
+      warnings.warn(
+        f"Unable to read Ideogram4 memory diagnostics for {device}: {exc}",
+        stacklevel=2,
+      )
+
+
+def _validate_device_configuration(
+  diffusion_device: torch.device, text_device: torch.device
+) -> None:
+  if diffusion_device == text_device:
+    return
+  if diffusion_device.type == "cuda" and text_device.type == "cuda":
+    if diffusion_device.index is None or text_device.index is None:
+      raise ValueError(
+        "Separate Ideogram4 CUDA/ROCm devices must use explicit indexes; got "
+        f"diffusion_device={diffusion_device}, text_device={text_device}"
+      )
+    try:
+      device_count = torch.cuda.device_count()
+    except Exception as exc:
+      raise RuntimeError(
+        "Unable to inspect CUDA/ROCm devices for split Ideogram4 placement: "
+        f"diffusion_device={diffusion_device}, text_device={text_device}"
+      ) from exc
+    highest_index = max(diffusion_device.index, text_device.index)
+    if device_count <= highest_index:
+      raise RuntimeError(
+        "Split Ideogram4 placement requested unavailable CUDA/ROCm devices: "
+        f"diffusion_device={diffusion_device}, text_device={text_device}, "
+        f"visible_device_count={device_count}"
+      )
+
+
+def _move_tensor_to_device(
+  tensor: torch.Tensor, destination: torch.device
+) -> torch.Tensor:
+  """Move one tensor directly, with a CPU-staged fallback for GPU peers."""
+  if tensor.device == destination:
+    return tensor
+  try:
+    return tensor.to(destination)
+  except RuntimeError as direct_error:
+    warnings.warn(
+      f"Direct tensor transfer {tensor.device} -> {destination} failed; "
+      f"staging through CPU. {direct_error}",
+      stacklevel=2,
+    )
+    return tensor.to("cpu").to(destination)
+
+
+def _append_image_feature_zeros(
+  text_features: torch.Tensor,
+  num_image_tokens: int,
+  destination: torch.device,
+) -> torch.Tensor:
+  """Rebuild full diffusion conditioning after compact text encoding."""
+  batch_size, _, feature_dim = text_features.shape
+  image_feature_zeros = torch.zeros(
+    batch_size,
+    num_image_tokens,
+    feature_dim,
+    dtype=text_features.dtype,
+    device=destination,
+  )
+  return torch.cat([text_features, image_feature_zeros], dim=1)
 
 
 def _load_subfolder_state_dict(
@@ -259,6 +369,7 @@ class Ideogram4Pipeline:
     config: Ideogram4PipelineConfig,
     device: torch.device,
     dtype: torch.dtype,
+    text_device: torch.device | None = None,
   ) -> None:
     self.conditional_transformer = conditional_transformer
     self.unconditional_transformer = unconditional_transformer
@@ -266,13 +377,17 @@ class Ideogram4Pipeline:
     self.text_tokenizer = text_tokenizer
     self.autoencoder = autoencoder
     self.config = config
-    self.device = device
+    self.diffusion_device = torch.device(device)
+    self.text_device = (
+      torch.device(text_device) if text_device is not None else self.diffusion_device
+    )
+    self.device = self.diffusion_device
     self.dtype = dtype
     self.caption_verifier = CaptionVerifier()
 
     shift, scale = get_latent_norm()
-    self.latent_shift = shift.to(device)
-    self.latent_scale = scale.to(device)
+    self.latent_shift = shift.to(self.diffusion_device)
+    self.latent_scale = scale.to(self.diffusion_device)
 
   @classmethod
   def from_pretrained(
@@ -280,12 +395,23 @@ class Ideogram4Pipeline:
     *,
     config: Optional[Ideogram4PipelineConfig] = None,
     device: str | torch.device = "cuda",
+    text_device: str | torch.device | None = None,
     dtype: torch.dtype = torch.bfloat16,
     transformer_config: Optional[Ideogram4Config] = None,
   ) -> "Ideogram4Pipeline":
     config = config or Ideogram4PipelineConfig()
     transformer_config = transformer_config or Ideogram4Config()
-    device = torch.device(device)
+    diffusion_device = torch.device(device)
+    resolved_text_device = (
+      torch.device(text_device) if text_device is not None else diffusion_device
+    )
+    _validate_device_configuration(diffusion_device, resolved_text_device)
+    print(
+      "Ideogram4 devices: "
+      f"diffusion_device={_device_description(diffusion_device)}, "
+      f"text_device={_device_description(resolved_text_device)}",
+      flush=True,
+    )
 
     conditional_state_dict = _load_indexed_or_single_state_dict(
       config.weights_repo, config.conditional_index_filename
@@ -298,33 +424,36 @@ class Ideogram4Pipeline:
     )
 
     conditional_transformer = _build_transformer(
-      transformer_config, conditional_state_dict, device, dtype
+      transformer_config, conditional_state_dict, diffusion_device, dtype
     )
     del conditional_state_dict
     unconditional_transformer = _build_transformer(
-      transformer_config, unconditional_state_dict, device, dtype
+      transformer_config, unconditional_state_dict, diffusion_device, dtype
     )
     del unconditional_state_dict
 
     text_tokenizer, text_encoder = _load_qwen3_vl(
       config.weights_repo,
-      device,
+      resolved_text_device,
       dtype,
       tokenizer_subfolder=config.tokenizer_subfolder,
       text_encoder_subfolder=config.text_encoder_subfolder,
     )
-    autoencoder = _load_autoencoder(autoencoder_weights, device, dtype)
+    autoencoder = _load_autoencoder(autoencoder_weights, diffusion_device, dtype)
 
-    return cls(
+    pipeline = cls(
       conditional_transformer=conditional_transformer,
       unconditional_transformer=unconditional_transformer,
       text_encoder=text_encoder,
       text_tokenizer=text_tokenizer,
       autoencoder=autoencoder,
       config=config,
-      device=device,
+      device=diffusion_device,
       dtype=dtype,
+      text_device=resolved_text_device,
     )
+    _log_device_memory([diffusion_device, resolved_text_device])
+    return pipeline
 
   def _tokenize(self, prompt: str) -> tuple[torch.Tensor, int]:
     """Build chat-formatted token ids for a single prompt."""
@@ -400,11 +529,12 @@ class Ideogram4Pipeline:
       segment_ids[b, offset : offset + total_unpadded] = 1
 
     return {
-      "token_ids": token_ids.to(self.device),
-      "text_position_ids": text_position_ids.to(self.device),
-      "position_ids": position_ids.to(self.device),
-      "segment_ids": segment_ids.to(self.device),
-      "indicator": indicator.to(self.device),
+      "token_ids": token_ids.to(self.text_device),
+      "text_position_ids": text_position_ids.to(self.text_device),
+      "text_indicator": indicator.to(self.text_device),
+      "position_ids": position_ids.to(self.diffusion_device),
+      "segment_ids": segment_ids.to(self.diffusion_device),
+      "indicator": indicator.to(self.diffusion_device),
       "num_image_tokens": num_image_tokens,  # type: ignore[dict-item]
       "grid_h": grid_h,  # type: ignore[dict-item]
       "grid_w": grid_w,  # type: ignore[dict-item]
@@ -454,19 +584,31 @@ class Ideogram4Pipeline:
     self,
     token_ids: torch.Tensor,
     text_position_ids: torch.Tensor,
-    indicator: torch.Tensor,
+    text_indicator: torch.Tensor,
+    max_text_tokens: int,
   ) -> torch.Tensor:
     """Run Qwen3-VL and stack hidden states from the activation layers.
 
-    Returns a (B, L, hidden_size * num_layers) float32 tensor.
+    Returns text-position features on the diffusion device as a
+    (B, max_text_tokens, hidden_size * num_layers) float32 tensor.
     """
+    token_ids = token_ids[:, :max_text_tokens].contiguous()
+    text_position_ids = text_position_ids[:, :max_text_tokens].contiguous()
+    text_indicator = text_indicator[:, :max_text_tokens].contiguous()
     batch_size, seq_len = token_ids.shape
 
     # Real text positions are exactly the LLM_TOKEN_INDICATOR positions.
-    attention_mask = (indicator == LLM_TOKEN_INDICATOR).to(torch.long)
+    attention_mask = (text_indicator == LLM_TOKEN_INDICATOR).to(torch.long)
 
     pos_2d = text_position_ids[..., 0].contiguous()
 
+    print(
+      "Ideogram4 text encoding started: "
+      f"sequence_length={seq_len}, device={_device_description(self.text_device)}",
+      flush=True,
+    )
+    _synchronize_device(self.text_device)
+    encode_started = time.perf_counter()
     with torch.no_grad():
       selected = self._get_qwen3_vl_embeddings(token_ids, attention_mask, pos_2d)
     stacked = torch.stack(selected, dim=0)  # (num_taps, B, L, H)
@@ -477,7 +619,24 @@ class Ideogram4Pipeline:
     # text features at LLM_TOKEN_INDICATOR positions.
     text_mask = attention_mask.to(stacked.dtype).unsqueeze(-1)
     stacked = stacked * text_mask
-    return stacked.to(torch.float32)
+    stacked = stacked.to(torch.float32)
+    _synchronize_device(self.text_device)
+    encode_elapsed = time.perf_counter() - encode_started
+
+    transfer_mib = stacked.numel() * stacked.element_size() / 1024**2
+    copy_started = time.perf_counter()
+    text_features = _move_tensor_to_device(stacked, self.diffusion_device)
+    _synchronize_device(self.diffusion_device)
+    copy_elapsed = time.perf_counter() - copy_started
+    print(
+      "Ideogram4 text encoding finished: "
+      f"feature_shape={tuple(text_features.shape)}, dtype={text_features.dtype}, "
+      f"transfer={transfer_mib:.1f} MiB, source={self.text_device}, "
+      f"destination={self.diffusion_device}, encode_time={encode_elapsed:.3f}s, "
+      f"copy_time={copy_elapsed:.3f}s",
+      flush=True,
+    )
+    return text_features
 
   def _verify_prompts(
     self, prompts: list[str], *, raise_on_issues: bool = True
@@ -525,11 +684,11 @@ class Ideogram4Pipeline:
     schedule = schedule or get_schedule_for_resolution(
       (height, width), known_mean=mu, std=std
     )
-    step_intervals = make_step_intervals(num_steps).to(self.device)
+    step_intervals = make_step_intervals(num_steps).to(self.diffusion_device)
 
     if guidance_schedule is not None:
       gw_per_step = torch.as_tensor(
-        guidance_schedule, dtype=torch.float32, device=self.device
+        guidance_schedule, dtype=torch.float32, device=self.diffusion_device
       )
       if gw_per_step.shape != (num_steps,):
         raise ValueError(
@@ -538,7 +697,10 @@ class Ideogram4Pipeline:
         )
     else:
       gw_per_step = torch.full(
-        (num_steps,), float(guidance_scale), dtype=torch.float32, device=self.device
+        (num_steps,),
+        float(guidance_scale),
+        dtype=torch.float32,
+        device=self.diffusion_device,
       )
 
     inputs = self._build_inputs(prompts, height=height, width=width)
@@ -549,7 +711,13 @@ class Ideogram4Pipeline:
     latent_dim = self.conditional_transformer.config.in_channels
 
     llm_features = self._encode_text(
-      inputs["token_ids"], inputs["text_position_ids"], inputs["indicator"]
+      inputs["token_ids"],
+      inputs["text_position_ids"],
+      inputs["text_indicator"],
+      max_text_tokens,
+    )
+    llm_features = _append_image_feature_zeros(
+      llm_features, num_image_tokens, self.diffusion_device
     )
 
     # Negative branch is image-only (asymmetric CFG) with zeroed conditioning.
@@ -561,10 +729,10 @@ class Ideogram4Pipeline:
       num_image_tokens,
       llm_features.shape[-1],
       dtype=llm_features.dtype,
-      device=self.device,
+      device=self.diffusion_device,
     )
 
-    generator = torch.Generator(device=self.device)
+    generator = torch.Generator(device=self.diffusion_device)
     if seed is not None:
       generator.manual_seed(seed)
     z = torch.randn(  # type: ignore[call-overload]
@@ -572,7 +740,7 @@ class Ideogram4Pipeline:
       num_image_tokens,
       latent_dim,
       dtype=torch.float32,
-      device=self.device,
+      device=self.diffusion_device,
       generator=generator,
     )
 
@@ -581,13 +749,15 @@ class Ideogram4Pipeline:
       max_text_tokens,
       latent_dim,
       dtype=torch.float32,
-      device=self.device,
+      device=self.diffusion_device,
     )
 
     for i in range(num_steps - 1, -1, -1):
       t_val = float(schedule(step_intervals[i + 1].unsqueeze(0)).item())
       s_val = float(schedule(step_intervals[i].unsqueeze(0)).item())
-      t = torch.full((batch_size,), t_val, dtype=torch.float32, device=self.device)
+      t = torch.full(
+        (batch_size,), t_val, dtype=torch.float32, device=self.diffusion_device
+      )
 
       pos_z = torch.cat([text_z_padding, z], dim=1)
       pos_out = self.conditional_transformer(

@@ -142,7 +142,7 @@ JSON
 
 echo "Starting automated ROCm validation."
 echo "This downloads gated NF4 weights if they are not already cached."
-echo "After both core tests pass, ComfyUI will remain running in the foreground."
+echo "Core and ComfyUI API tests run automatically; the validated server then remains running."
 
 VALIDATOR_ARGS=(
   --caption "$CAPTION_FILE"

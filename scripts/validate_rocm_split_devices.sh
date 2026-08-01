@@ -189,6 +189,7 @@ SMALL_LOG="$OUTPUT_DIR/core-256.log"
 FULL_LOG="$OUTPUT_DIR/core-1024.log"
 GPU_LOG="$OUTPUT_DIR/gpu-monitor.log"
 MONITOR_PID=""
+COMFYUI_PID=""
 
 stop_monitor() {
   if [[ -n "$MONITOR_PID" ]] && kill -0 "$MONITOR_PID" 2>/dev/null; then
@@ -197,9 +198,17 @@ stop_monitor() {
   fi
 }
 
+stop_comfyui() {
+  if [[ -n "$COMFYUI_PID" ]] && kill -0 "$COMFYUI_PID" 2>/dev/null; then
+    kill "$COMFYUI_PID" 2>/dev/null || true
+    wait "$COMFYUI_PID" 2>/dev/null || true
+  fi
+}
+
 on_exit() {
   status=$?
   stop_monitor
+  stop_comfyui
   if ((status == 0)); then
     echo "Validation command completed. Artifacts: $OUTPUT_DIR"
   else
@@ -420,14 +429,28 @@ if ((LAUNCH_COMFYUI == 1)); then
     fail "installed ComfyUI-Ideogram4 does not contain the split-device wrapper change"
   fi
   echo "Launching ComfyUI on port $COMFYUI_PORT." | tee -a "$SUMMARY_LOG"
-  echo "Queue the existing Pipeline Loader -> Generate -> Save Image workflow." | tee -a "$SUMMARY_LOG"
-  echo "Use 4.0 NF4, 1024x1024, V4_DEFAULT_20, batch size 1." | tee -a "$SUMMARY_LOG"
+  echo "Submitting 4.0 NF4, 1024x1024, V4_DEFAULT_20 through the ComfyUI API." \
+    | tee -a "$SUMMARY_LOG"
   cd -- "$COMFYUI_DIR"
   "$PYTHON_BIN" main.py \
     --listen 0.0.0.0 \
     --port "$COMFYUI_PORT" \
     --disable-pinned-memory \
-    2>&1 | tee "$OUTPUT_DIR/comfyui.log"
+    >"$OUTPUT_DIR/comfyui.log" 2>&1 &
+  COMFYUI_PID=$!
+  cd -- "$CORE_DIR"
+  if ! "$PYTHON_BIN" "$CORE_DIR/scripts/validate_comfyui_api.py" \
+    --base-url "http://127.0.0.1:$COMFYUI_PORT" \
+    --caption-file "$CAPTION_FILE" \
+    2>&1 | tee "$OUTPUT_DIR/comfyui-api-validation.log"; then
+    echo "ComfyUI API validation failed. Recent server log:" >&2
+    tail -n 200 "$OUTPUT_DIR/comfyui.log" >&2 || true
+    exit 1
+  fi
+  echo "comfyui_validation=PASS" | tee -a "$SUMMARY_LOG"
+  echo "ComfyUI remains available at http://0.0.0.0:$COMFYUI_PORT; press Ctrl-C to stop it." \
+    | tee -a "$SUMMARY_LOG"
+  wait "$COMFYUI_PID"
 else
   if [[ -n "$COMFYUI_DIR" ]]; then
     cat <<EOF | tee -a "$SUMMARY_LOG"

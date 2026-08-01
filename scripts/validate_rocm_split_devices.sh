@@ -176,9 +176,13 @@ export IDEOGRAM4_DIFFUSION_DEVICE="$DIFFUSION_DEVICE"
 export IDEOGRAM4_TEXT_DEVICE="$TEXT_DEVICE"
 export IDEOGRAM4_REPO="$CORE_DIR"
 export PYTHONUNBUFFERED=1
-if [[ -z "${PYTORCH_ALLOC_CONF:-}" && -z "${PYTORCH_CUDA_ALLOC_CONF:-}" ]]; then
-  export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-fi
+
+# ROCm 7.2 does not support PyTorch's expandable allocator segments. Keep
+# MIOpen away from its high-workspace GEMM/FFT convolution paths instead; the
+# direct, Winograd, and implicit-GEMM solvers remain available for VAE decode.
+export MIOPEN_FIND_MODE="${MIOPEN_FIND_MODE:-FAST}"
+export MIOPEN_DEBUG_CONV_GEMM="${MIOPEN_DEBUG_CONV_GEMM:-0}"
+export MIOPEN_DEBUG_CONV_FFT="${MIOPEN_DEBUG_CONV_FFT:-0}"
 
 SUMMARY_LOG="$OUTPUT_DIR/summary.log"
 SMALL_LOG="$OUTPUT_DIR/core-256.log"
@@ -238,6 +242,9 @@ start_monitor() {
   echo "HF_HOME=${HF_HOME:-<default>}"
   echo "PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-<unset>}"
   echo "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-<unset>}"
+  echo "MIOPEN_FIND_MODE=$MIOPEN_FIND_MODE"
+  echo "MIOPEN_DEBUG_CONV_GEMM=$MIOPEN_DEBUG_CONV_GEMM"
+  echo "MIOPEN_DEBUG_CONV_FFT=$MIOPEN_DEBUG_CONV_FFT"
   df -h -- "$OUTPUT_DIR"
 } | tee "$SUMMARY_LOG"
 

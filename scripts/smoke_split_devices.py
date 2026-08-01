@@ -48,6 +48,11 @@ def _print_preflight(diffusion_device: str, text_device: str) -> None:
     print(f"allocator_backend={torch.cuda.get_allocator_backend()}")
   except Exception as exc:  # noqa: BLE001 - diagnostics must not block validation
     print(f"allocator_backend=<unavailable: {exc}>")
+  print(f"MIOPEN_FIND_MODE={os.environ.get('MIOPEN_FIND_MODE', '<default>')}")
+  print(
+    f"MIOPEN_DEBUG_CONV_GEMM={os.environ.get('MIOPEN_DEBUG_CONV_GEMM', '<default>')}"
+  )
+  print(f"MIOPEN_DEBUG_CONV_FFT={os.environ.get('MIOPEN_DEBUG_CONV_FFT', '<default>')}")
   print(f"visible_device_count={torch.cuda.device_count()}")
   for index in range(torch.cuda.device_count()):
     properties = torch.cuda.get_device_properties(index)

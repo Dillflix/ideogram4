@@ -784,6 +784,31 @@ class Ideogram4Pipeline:
       delta = s_val - t_val
       z = z + v * delta
 
+      # Do not retain the final step's branch outputs while the VAE allocates
+      # its decode workspace. These tensors are recreated on every step.
+      del pos_z, pos_out, pos_v, neg_v, v, t
+
+    # Full text-plus-image conditioning is needed only by the diffusion models.
+    # At 1024x1024 the positive and negative float32 feature tensors occupy
+    # roughly 1.7 GiB together, enough to crowd out the VAE's peak workspace on
+    # a 20 GiB diffusion device if their references survive into _decode().
+    del (
+      llm_features,
+      neg_llm_features,
+      text_z_padding,
+      neg_position_ids,
+      neg_segment_ids,
+      neg_indicator,
+      inputs,
+      gw_per_step,
+      step_intervals,
+      generator,
+    )
+    _synchronize_device(self.diffusion_device)
+    if self.diffusion_device.type == "cuda":
+      torch.cuda.empty_cache()
+    _log_device_memory([self.diffusion_device])
+
     return self._decode(z, grid_h=grid_h, grid_w=grid_w)  # type: ignore[arg-type]
 
   def _decode(self, z: torch.Tensor, *, grid_h: int, grid_w: int) -> list[Image.Image]:

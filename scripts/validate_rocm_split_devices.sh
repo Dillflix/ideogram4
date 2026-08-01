@@ -176,6 +176,9 @@ export IDEOGRAM4_DIFFUSION_DEVICE="$DIFFUSION_DEVICE"
 export IDEOGRAM4_TEXT_DEVICE="$TEXT_DEVICE"
 export IDEOGRAM4_REPO="$CORE_DIR"
 export PYTHONUNBUFFERED=1
+if [[ -z "${PYTORCH_ALLOC_CONF:-}" && -z "${PYTORCH_CUDA_ALLOC_CONF:-}" ]]; then
+  export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+fi
 
 SUMMARY_LOG="$OUTPUT_DIR/summary.log"
 SMALL_LOG="$OUTPUT_DIR/core-256.log"
@@ -233,6 +236,8 @@ start_monitor() {
   echo "text_device=$TEXT_DEVICE"
   echo "weights_repo=$WEIGHTS_REPO"
   echo "HF_HOME=${HF_HOME:-<default>}"
+  echo "PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-<unset>}"
+  echo "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-<unset>}"
   df -h -- "$OUTPUT_DIR"
 } | tee "$SUMMARY_LOG"
 

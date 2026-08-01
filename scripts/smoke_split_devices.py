@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -39,6 +40,14 @@ def _parse_args() -> argparse.Namespace:
 def _print_preflight(diffusion_device: str, text_device: str) -> None:
   print(f"torch={torch.__version__}")
   print(f"HIP={torch.version.hip}")
+  print(
+    "allocator_config="
+    f"{os.environ.get('PYTORCH_ALLOC_CONF') or os.environ.get('PYTORCH_CUDA_ALLOC_CONF') or '<default>'}"
+  )
+  try:
+    print(f"allocator_backend={torch.cuda.get_allocator_backend()}")
+  except Exception as exc:  # noqa: BLE001 - diagnostics must not block validation
+    print(f"allocator_backend=<unavailable: {exc}>")
   print(f"visible_device_count={torch.cuda.device_count()}")
   for index in range(torch.cuda.device_count()):
     properties = torch.cuda.get_device_properties(index)
